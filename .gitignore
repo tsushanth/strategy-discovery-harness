@@ -1,0 +1,8 @@
+.venv/
+__pycache__/
+*.pyc
+.pytest_cache/
+
+# discovery-harness runtime outputs (ideas/results/leaderboard/candidates,
+# locks, logs, cached FRED CSVs) -- regenerated every cycle, never committed.
+state/
