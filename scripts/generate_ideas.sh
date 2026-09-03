@@ -23,8 +23,18 @@ IDEAS_FILE="$STATE/ideas.json"
 IDEAS_PER_CYCLE="${IDEAS_PER_CYCLE:-4}"
 MAX_BUDGET_USD="${MAX_BUDGET_USD:-2}"
 
+# A non-interactive shell (cron/launchd/SSH) often doesn't have `claude`
+# on PATH even when it's installed and logged in for the interactive user
+# session -- check the common install locations before giving up.
+CLAUDE_BIN="claude"
 if ! command -v claude >/dev/null 2>&1; then
-  echo "[generate_ideas] 'claude' CLI not found on PATH -- skipping generation." >&2
+  for candidate in "$HOME/.local/bin/claude" "/opt/homebrew/bin/claude"; do
+    if [ -x "$candidate" ]; then CLAUDE_BIN="$candidate"; break; fi
+  done
+fi
+
+if ! command -v "$CLAUDE_BIN" >/dev/null 2>&1 && [ ! -x "$CLAUDE_BIN" ]; then
+  echo "[generate_ideas] 'claude' CLI not found -- skipping generation." >&2
   echo "[generate_ideas] The harness still runs on state/ideas.json / built-in seeds." >&2
   exit 0
 fi
@@ -99,7 +109,7 @@ HARD RULES:
 Return ONLY JSON matching the provided schema."
 
 echo "[generate_ideas] requesting ${IDEAS_PER_CYCLE} idea(s), budget \$${MAX_BUDGET_USD}..." >&2
-RAW="$(claude -p "$PROMPT" \
+RAW="$("$CLAUDE_BIN" -p "$PROMPT" \
   --output-format json \
   --json-schema "$SCHEMA" \
   --max-budget-usd "$MAX_BUDGET_USD" \
