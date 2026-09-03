@@ -483,18 +483,159 @@ def run_pairs_stat_arb(idea: Idea) -> EngineResult:
     return res
 
 
+# --------------------------------------------------------------------------- #
+# Engine 5: news sentiment (NEW) -- real Alpaca headlines, VADER-scored
+# --------------------------------------------------------------------------- #
+DEFAULT_NEWS_SYMBOLS = ["ROKU", "ETSY", "PINS", "SNAP"]
+NEWS_HOLD_GRID = [1, 3, 5]
+NEWS_QUANTILE_GRID = [0.80, 0.90, 0.95]
+
+
+def run_news_sentiment(idea: Idea) -> EngineResult:
+    """Trades the direction of extreme daily news sentiment. Real Alpaca
+    headlines (same API key already used for trading/prices -- no
+    separate credential needed, despite the harness's earlier
+    assumption), scored with VADER -- a real, standard, deterministic
+    lexicon tool, but NOT finance-tuned (a real limitation: "crash" and
+    "beat estimates" aren't in its training vocabulary the way a
+    finance-specific model would score them). lineage=real because
+    every input (headlines, prices) is real and unmanipulated; the
+    VADER-generic-lexicon caveat is noted, not hidden.
+    """
+    from datetime import datetime
+    import news_data
+
+    symbols = idea.instruments or DEFAULT_NEWS_SYMBOLS
+    p = idea.parameters or {}
+    cost_bps = float(p.get("cost_bps", 10.0))  # fixed, not tuned
+    start = datetime(2018, 1, 1)
+    end = datetime.now()
+
+    res = EngineResult(idea_id=idea.id, template=idea.template, ok=False, lineage=LINEAGE_REAL)
+    try:
+        symbol_sent, symbol_close = {}, {}
+        for sym in symbols:
+            sent = news_data.fetch_daily_sentiment(sym, start, end)
+            if len(sent) < 20:
+                continue
+            close = _load_equity(sym)
+            symbol_sent[sym] = sent
+            symbol_close[sym] = close
+        if not symbol_sent:
+            res.error = "no symbol had enough real news-sentiment days to test"
+            return res
+
+        events = []
+        for sym, sent in symbol_sent.items():
+            for date, score in sent.items():
+                events.append({"symbol": sym, "date": date, "score": float(score)})
+        events.sort(key=lambda e: e["date"])
+        n = len(events)
+        if n < 40:
+            res.error = f"only {n} pooled sentiment-days across {len(symbol_sent)} symbols -- not enough to split"
+            return res
+        split = int(n * 0.7)
+        in_sample, out_sample = events[:split], events[split:]
+        res.premise_check = {"symbols": list(symbol_sent), "pooled_days": n,
+                             "mean_abs_sentiment": float(np.mean([abs(e["score"]) for e in events]))}
+
+        def trades_for(ev_slice, thr, hold, direction):
+            """Returns (trades, entry_dates) -- dates tracked alongside each
+            trade at construction time, not reconstructed afterward, so
+            there's no ambiguity mapping a trade back to its real date."""
+            out, out_dates = [], []
+            for sym in symbol_sent:
+                close = symbol_close[sym]
+                dates_list = list(close.index)
+                pos = {d: i for i, d in enumerate(dates_list)}
+                sym_events = sorted([e for e in ev_slice if e["symbol"] == sym and abs(e["score"]) >= thr],
+                                    key=lambda e: e["date"])
+                last_exit = -1
+                for e in sym_events:
+                    i = pos.get(e["date"])
+                    if i is None:
+                        after = [j for j, d in enumerate(dates_list) if d >= e["date"]]
+                        if not after:
+                            continue
+                        i = after[0]
+                    if i <= last_exit:
+                        continue  # non-overlapping, same reasoning as the macro engine
+                    j = i + hold
+                    if j >= len(dates_list):
+                        continue
+                    entry, exit_ = float(close.iloc[i]), float(close.iloc[j])
+                    fees = (entry + exit_) * cost_bps / 10_000
+                    out.append(EventTrade(sym, i, j, direction, entry, exit_, fees))
+                    out_dates.append(dates_list[i])
+                    last_exit = j
+            return out, out_dates
+
+        grid, best = [], None
+        chosen_dir, chosen_thr = {}, {}
+        is_scores = np.array([abs(e["score"]) for e in in_sample])
+        for hold in NEWS_HOLD_GRID:
+            for q in NEWS_QUANTILE_GRID:
+                thr = float(np.quantile(is_scores, q))
+                best_dir, best_pnl, best_n = 0, -np.inf, 0
+                for direction in (1, -1):
+                    tr, _ = trades_for(in_sample, thr, hold, direction)
+                    if not tr:
+                        continue
+                    m = summarize(tr)
+                    if m["net_pnl"] > best_pnl:
+                        best_pnl, best_dir, best_n = m["net_pnl"], direction, m["n_trades"]
+                if best_dir == 0:
+                    continue
+                key = (hold, q)
+                chosen_dir[key] = best_dir
+                chosen_thr[key] = thr
+                grid.append(GridCell(params={"hold_days": hold, "threshold_q": q},
+                                     score=float(best_pnl), n_trades=int(best_n)))
+                if best is None or best_pnl > best.score:
+                    best = grid[-1]
+        if best is None:
+            res.error = "no in-sample sentiment trades produced by any config"
+            return res
+
+        res.in_sample_grid = grid
+        key = (best.params["hold_days"], best.params["threshold_q"])
+        direction, thr, hold = chosen_dir[key], chosen_thr[key], best.params["hold_days"]
+        res.chosen_params = {"hold_days": hold, "threshold_q": best.params["threshold_q"],
+                             "abs_sentiment_threshold": thr}
+        res.in_sample_metrics = {"net_pnl": best.score, "n_trades": best.n_trades, "direction": direction}
+
+        oos_trades, oos_trade_dates = trades_for(out_sample, thr, hold, direction)
+        paired = sorted(zip(oos_trades, oos_trade_dates), key=lambda td: td[1])
+        oos_sorted = [t for t, _ in paired]
+        oos_dates = [d for _, d in paired]
+        m = summarize(oos_sorted)
+        if oos_sorted:
+            m["sharpe"] = _sharpe_from_dates(oos_sorted, oos_dates)
+        res.oos_metrics = m
+        res.n_oos_trades = int(m.get("n_trades", 0))
+        res.notes.append(f"real Alpaca news, VADER-scored, {len(symbol_sent)} symbols, "
+                         f"frozen |sentiment|>={thr:.3f}, hold={hold}d, dir={'+1' if direction>0 else '-1'}, "
+                         f"cost={cost_bps}bps rt")
+        res.notes.append(f"{split} in-sample / {n - split} OOS pooled sentiment-days")
+        res.notes.append("VADER is a generic lexicon, not finance-tuned -- a real limitation on signal quality")
+        res.ok = True
+    except Exception as e:
+        res.error = f"{type(e).__name__}: {e}"
+    return res
+
+
 ENGINES = {
     "event_window_earnings": run_event_window_earnings,
     "macro_release_drift": run_macro_release_drift,
     "macro_release_calendar": run_macro_release_calendar,
     "pairs_stat_arb": run_pairs_stat_arb,
+    "news_sentiment": run_news_sentiment,
 }
 
 # Templates recognised but intentionally not runnable yet (credential/data gated).
 DEFERRED_TEMPLATES = {
     "vol_surface_mispricing": "IBKR OPTION_IMPLIED_VOLATILITY -- needs TWS/Gateway connected",
     "order_flow_imbalance": "LOBSTER L2 -- free samples too thin for a real OOS split",
-    "news_sentiment": "Alpaca news feed -- needs API key",
 }
 
 

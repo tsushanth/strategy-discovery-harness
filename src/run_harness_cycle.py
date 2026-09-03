@@ -89,6 +89,18 @@ SEED_IDEAS = [
         "data_source": "yfinance daily closes",
         "parameters": {"exit_z": 0.5, "cost_bps": 10.0},
     },
+    {
+        "id": "seed-news-sentiment-smallcap",
+        "title": "Trade the direction of extreme daily news sentiment",
+        "family": "news_driven",
+        "template": "news_sentiment",
+        "instruments": ["ROKU", "ETSY", "PINS", "SNAP"],
+        "rationale": "Extreme daily headline sentiment (VADER-scored, real Alpaca news) "
+                     "may predict a short-term drift; test on liquid non-mega-cap names "
+                     "where sentiment-driven moves are less arbitraged away.",
+        "data_source": "Alpaca news feed (same API key as trading/prices) + yfinance",
+        "parameters": {"cost_bps": 10.0},
+    },
 ]
 
 

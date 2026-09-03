@@ -43,6 +43,7 @@ scripts/generate_ideas.sh      state/ideas.json        src/run_harness_cycle.py
 | `macro_release_drift` | **FRED (keyless) DGSx/DFF/… + yfinance ETF** | equity drift in the days after a large daily macro-rate shock | **real** |
 | `macro_release_calendar` | **FRED release-dates API (free key) + yfinance ETF** | equity drift into/out of a real scheduled announcement (CPI, NFP, …) | **real** |
 | `pairs_stat_arb` | yfinance daily closes (basket) | mean-reversion of a hedged cointegration spread; best pair chosen in-sample | **real** |
+| `news_sentiment` | **Alpaca news feed (same key as trading/prices — no separate credential needed) + yfinance** | direction of extreme daily VADER-scored headline sentiment | **real** |
 
 All: grid-search parameters on the first ~70% of events chronologically, then
 evaluate the frozen config **once** on the final ~30%. Costs are charged on
@@ -79,12 +80,33 @@ it searches all candidate pairs **in-sample only**, freezes the single best
 `(pair, β, window, entry_z)`, and evaluates it OOS once — so pair selection can't
 peek at the held-out window.
 
+### News sentiment (`news_sentiment`)
+
+The "needs an Alpaca news API key" assumption in the original scoping was
+wrong — checked directly, and the existing `ALPACA_API_KEY`/`ALPACA_SECRET_KEY`
+already used for trading/prices covers the news feed too, no separate
+credential. Headlines are scored with **VADER**, a real, standard,
+deterministic lexicon-based sentiment tool — not finance-tuned (a real
+limitation, noted in every result's `notes`, not hidden). `lineage=real`
+since every input (headlines, prices) is real and unmanipulated.
+
+Found and fixed a real bug building this: requesting a wide date range
+(2018–now) in one call silently returned only the most recent ~50 articles
+with `next_page_token` already `None`, while the identical request with an
+explicit narrow `end` date correctly returned real older history. Fixed by
+walking the range in 90-day chunks (`src/news_data.py`) instead of trusting
+the token across a wide span.
+
+Real result (seed idea, 4 symbols, 2018–now): 2,484 pooled sentiment-days,
+76 real OOS trades — Sharpe **-0.89**, net PnL **-$39.20**. Honest no-edge
+result, correctly not promoted.
+
 ### Deferred engines (credential/data gated — stubs, not implemented)
 
 `vol_surface_mispricing` (IBKR IV, needs TWS/Gateway) · `order_flow_imbalance`
-(LOBSTER L2, free samples too thin for an OOS split) · `news_sentiment` (Alpaca
-news, needs key). Registered in `DEFERRED_TEMPLATES`, shown on the leaderboard as
-not-run so the gap is visible rather than silent.
+(LOBSTER L2, free samples too thin for an OOS split). Registered in
+`DEFERRED_TEMPLATES`, shown on the leaderboard as not-run so the gap is
+visible rather than silent.
 
 ## Structural gates (`src/harness_gates.py`)
 
