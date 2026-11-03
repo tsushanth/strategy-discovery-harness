@@ -129,6 +129,10 @@ def extract(obj):
     # claude --output-format json wraps the model result; be tolerant of shape.
     if isinstance(obj, dict) and "ideas" in obj:
         return obj["ideas"]
+    # With --json-schema the validated payload is in "structured_output" (and
+    # "result" is often empty); check it first or every cycle adds 0 ideas.
+    if isinstance(obj, dict) and isinstance(obj.get("structured_output"), dict) and "ideas" in obj["structured_output"]:
+        return obj["structured_output"]["ideas"]
     for key in ("result", "content", "output"):
         if isinstance(obj, dict) and key in obj:
             try:
